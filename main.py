@@ -100,14 +100,12 @@ def expand_url_with_selenium(url: str) -> str:
 @app.post("/expand-and-parse")
 def expand_and_parse(req: ShortURLRequest):
     try:
-        if "maps.app.goo.gl" in req.short_url:
-            final_url = expand_url_with_selenium(req.short_url)
-        else:
-            try:
-                expanded_response = requests.get(req.short_url, allow_redirects=True, timeout=5)
-                final_url = expanded_response.url
-            except Exception:
-                final_url = expand_url_with_selenium(req.short_url)
+        # Try to expand with requests
+        try:
+            expanded_response = requests.get(req.short_url, allow_redirects=True, timeout=5)
+            final_url = expanded_response.url
+        except Exception:
+            raise HTTPException(status_code=500, detail="Failed to expand the short URL")
 
         parsed_url = urlparse(final_url)
         path_parts = parsed_url.path.split('/')
@@ -153,7 +151,7 @@ def expand_and_parse(req: ShortURLRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 @app.post("/google-directions")
 def get_google_directions(data: dict = Body(...)):
     origin = data.get("origin")
