@@ -5,3 +5,6 @@ jinja2
 pydantic
 selenium
 python-multipart
+databases
+sqlalchemy
+asyncpg

@@ -6,12 +6,38 @@ from urllib.parse import urlparse, unquote
 import re
 from datetime import datetime
 import requests
-import json
 from fastapi.middleware.cors import CORSMiddleware
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+import databases
+import sqlalchemy
+import os
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+DATABASE_URL = os.getenv("DATABASE_URL")
+database = databases.Database(DATABASE_URL)
+metadata = sqlalchemy.MetaData()
+
+routes = sqlalchemy.Table(
+    "routes",
+    metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("user_id", sqlalchemy.String),
+    sqlalchemy.Column("polyline", sqlalchemy.Text),
+    sqlalchemy.Column("timestamp", sqlalchemy.DateTime),
+)
+
+engine = sqlalchemy.create_engine(DATABASE_URL)
+metadata.create_all(engine)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await database.connect()
+    yield
+    await database.disconnect()
+
+app = FastAPI(lifespan=lifespan)
+
 GOOGLE_API_KEY = "AIzaSyCFo7709M-ddaTvahV_wG1Buh4lPjRFhvQ" 
 
 # Allow CORS for local development
@@ -33,42 +59,31 @@ def home(request: Request):
     return templates.TemplateResponse("map.html", {"request": request})
 
 @app.post("/save-route")
-def save_route(data: dict = Body(...)):
+async def save_route(data: dict = Body(...)):
     user_id = data.get("user_id")
     polyline = data.get("polyline")
 
     if not user_id or not polyline:
         raise HTTPException(status_code=400, detail="Missing user_id or polyline")
 
-    new_entry = {
-        "user_id": user_id,
-        "polyline": polyline,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-    try:
-        with open("roads.json", "r") as f:
-            db = json.load(f)
-    except FileNotFoundError:
-        db = {"paths": []}
-
-    db["paths"].append(new_entry)
-
-    with open("roads.json", "w") as f:
-        json.dump(db, f, indent=2)
-
+    query = routes.insert().values(
+        user_id=user_id,
+        polyline=polyline,
+        timestamp=datetime.utcnow()
+    )
+    await database.execute(query)
     return {"message": "Route saved successfully"}
 
 @app.get("/user-paths")
-def get_user_paths(user_id: str):
-    try:
-        with open("roads.json", "r") as f:
-            db = json.load(f)
-    except FileNotFoundError:
-        return {"paths": []}
-
-    user_paths = [p for p in db["paths"] if p["user_id"] == user_id]
-    return {"paths": user_paths}
+async def get_user_paths(user_id: str):
+    query = routes.select().where(routes.c.user_id == user_id)
+    results = await database.fetch_all(query)
+    return {
+        "paths": [
+            {"polyline": r["polyline"], "timestamp": str(r["timestamp"])}
+            for r in results
+        ]
+    }
 
 def expand_url_with_selenium(url: str) -> str:
     chrome_options = Options()
@@ -93,7 +108,6 @@ def expand_and_parse(req: ShortURLRequest):
                 final_url = expanded_response.url
             except Exception:
                 final_url = expand_url_with_selenium(req.short_url)
-
 
         parsed_url = urlparse(final_url)
         path_parts = parsed_url.path.split('/')
@@ -161,9 +175,9 @@ def get_google_directions(data: dict = Body(...)):
     if result["status"] != "OK":
         return {"error": result.get("error_message", "Failed to get route")}
 
-    routes = []
+    routes_list = []
     for idx, route in enumerate(result["routes"]):
-        routes.append({
+        routes_list.append({
             "route_index": idx,
             "summary": route.get("summary"),
             "distance": route["legs"][0]["distance"]["text"],
@@ -171,4 +185,4 @@ def get_google_directions(data: dict = Body(...)):
             "polyline": route["overview_polyline"]["points"]
         })
 
-    return {"routes": routes}
+    return {"routes": routes_list}
