@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>My Routes Tracker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Leaflet & Routing -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.css" />
+  <script src="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.min.js"></script>
+
+  <!-- Polyline decoder -->
+  <script src="https://unpkg.com/@mapbox/polyline"></script>
+
+  <style>
+    body { margin: 0; padding: 0; font-family: sans-serif; }
+    #controls {
+      padding: 10px;
+      background: #f0f0f0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    input, button {
+      padding: 8px;
+      font-size: 16px;
+    }
+    input {
+      flex: 1;
+      min-width: 200px;
+    }
+    #map {
+      height: calc(100vh - 60px);
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="controls">
+    <input type="text" id="username" placeholder="Your name (e.g. tejas)">
+    <input type="text" id="shortUrl" placeholder="Paste short Google Maps URL...">
+    <button onclick="handleRoute()">Show Routes</button>
+    <button onclick="loadMyRoutes()">Load My Routes</button>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+  const map = L.map('map').setView([35.6895, 139.6917], 12); // Tokyo default
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap & Carto',
+    subdomains: 'abcd'
+  }).addTo(map);
+
+  let routeLayer = null;
+  let currentRoutes = [];
+
+  async function handleRoute() {
+    const username = document.getElementById("username").value.trim();
+    const shortUrl = document.getElementById("shortUrl").value.trim();
+
+    if (!username || !shortUrl) {
+      alert("Enter your name and a valid Google Maps URL.");
+      return;
+    }
+
+    try {
+      // Step 1: Expand and parse URL
+      const parsed = await fetch("/expand-and-parse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ short_url: shortUrl })
+      });
+      const routeData = await parsed.json();
+      const { origin, destination, mode } = routeData;
+
+      // Step 2: Get Google directions (with alternatives)
+      const directions = await fetch("/google-directions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ origin, destination, mode })
+      });
+      const json = await directions.json();
+
+      currentRoutes = json.routes;
+      if (!currentRoutes || currentRoutes.length === 0) {
+        throw new Error("No routes found.");
+      }
+
+      // Step 3: Show route selection UI
+      showRouteOptions(currentRoutes);
+
+    } catch (err) {
+      console.error(err);
+      alert("Something went wrong: " + err.message);
+    }
+  }
+
+  function showRouteOptions(routes) {
+    const container = document.getElementById("controls");
+
+    // Remove any previous selection UI
+    const oldOptions = document.getElementById("route-options");
+    if (oldOptions) oldOptions.remove();
+
+    const optionsDiv = document.createElement("div");
+    optionsDiv.id = "route-options";
+    optionsDiv.style.marginTop = "10px";
+    optionsDiv.style.width = "100%";
+
+    routes.forEach((route, index) => {
+      const summary = route.summary || `Route ${index + 1}`;
+      const item = document.createElement("div");
+      item.innerHTML = `
+        <input type="radio" name="route-choice" value="${index}" id="route-${index}" ${index === 0 ? "checked" : ""}>
+        <label for="route-${index}"><strong>${summary}</strong> — ${route.distance}, ${route.duration}</label>
+      `;
+      optionsDiv.appendChild(item);
+    });
+
+    const saveBtn = document.createElement("button");
+    saveBtn.textContent = "Save Selected Route";
+    saveBtn.style.marginTop = "10px";
+    saveBtn.onclick = saveSelectedRoute;
+    optionsDiv.appendChild(saveBtn);
+
+    container.appendChild(optionsDiv);
+
+    // Add event listeners to radio buttons to update map
+    routes.forEach((route, index) => {
+      const radio = document.getElementById(`route-${index}`);
+      radio.addEventListener("change", () => {
+        drawRoute(route.polyline);
+      });
+    });
+
+    // Draw the first route by default
+    drawRoute(routes[0].polyline);
+  }
+
+  function drawRoute(polylineStr) {
+    const latlngs = polyline.decode(polylineStr).map(([lat, lng]) => L.latLng(lat, lng));
+    if (routeLayer) routeLayer.remove();
+    routeLayer = L.polyline(latlngs, { color: "blue", weight: 5 }).addTo(map);
+    map.fitBounds(routeLayer.getBounds());
+  }
+
+  function saveSelectedRoute() {
+    const username = document.getElementById("username").value.trim();
+    const selectedIndex = document.querySelector('input[name="route-choice"]:checked');
+    if (!selectedIndex) {
+      alert("Please select a route.");
+      return;
+    }
+
+    const route = currentRoutes[selectedIndex.value];
+    drawRoute(route.polyline);  // Optional: re-draw to ensure match
+
+    // Save to backend
+    fetch("/save-route", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: username,
+        polyline: route.polyline
+      })
+    })
+      .then(res => res.json())
+      .then(() => alert("Route saved successfully for user: " + username))
+      .catch(err => {
+        console.error(err);
+        alert("Failed to save route.");
+      });
+  }
+
+  async function loadMyRoutes() {
+    map.eachLayer(layer => {
+      if (layer instanceof L.Polyline && !(layer instanceof L.TileLayer)) {
+        map.removeLayer(layer);
+      }
+    });
+
+    const username = document.getElementById("username").value.trim();
+    if (!username) {
+      alert("Enter your name to load saved routes.");
+      return;
+    }
+
+    try {
+      const res = await fetch(`/user-paths?user_id=${encodeURIComponent(username)}`);
+      const data = await res.json();
+      if (!data.paths || data.paths.length === 0) {
+        alert("No saved routes found for " + username);
+        return;
+      }
+
+      data.paths.forEach(path => {
+        const latlngs = polyline.decode(path.polyline).map(([lat, lng]) => L.latLng(lat, lng));
+        L.polyline(latlngs, { color: "green", weight: 4, opacity: 0.7 }).addTo(map);
+      });
+
+      alert(`${data.paths.length} route(s) loaded for ${username}`);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to load your saved routes.");
+    }
+  }
+</script>
+
+
+</body>
+</html>
